@@ -1,0 +1,1 @@
+inno ALL=(root) NOPASSWD: /usr/local/sbin/blacklist-apply-update.sh

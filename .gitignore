@@ -1,0 +1,6 @@
+.env
+authorized_users.txt
+staging/
+venv/
+__pycache__/
+*.pyc

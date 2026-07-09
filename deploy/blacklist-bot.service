@@ -1,0 +1,16 @@
+[Unit]
+Description=Blacklist LINE Bot Webhook
+After=network.target
+
+[Service]
+Type=simple
+User=inno
+Group=inno
+WorkingDirectory=/home/inno/blacklist-bot/app
+ExecStart=/home/inno/blacklist-bot/venv/bin/python /home/inno/blacklist-bot/app/main.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=false
+
+[Install]
+WantedBy=multi-user.target

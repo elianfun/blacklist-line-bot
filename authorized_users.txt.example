@@ -1,0 +1,2 @@
+# 每行一個 LINE userId，井字號開頭視為註解
+# 先傳訊息給 bot，未授權時 bot 會回覆你的 userId，複製貼到 authorized_users.txt 即可
