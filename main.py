@@ -24,7 +24,8 @@ LIVE_IP_TXT = Path("/home/inno/hfs/share/blacklist/ip.txt")
 STAGING_IP_TXT = Path("/home/inno/blacklist-bot/staging/ip.txt")
 APPLY_SCRIPT = "/usr/local/sbin/blacklist-apply-update.sh"
 
-IP_TOKEN_RE = re.compile(r"\d{1,3}(?:\.\d{1,3}){3}")
+TOKEN_SPLIT_RE = re.compile(r"[\s,，、;；]+")
+IP_LIKE_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("blacklist-bot")
@@ -70,8 +71,18 @@ def reply_message(reply_token: str, text: str):
         logger.exception("LINE reply request failed")
 
 
-def extract_ip_candidates(text: str):
-    return IP_TOKEN_RE.findall(text)
+def parse_ip_message(text: str):
+    """將訊息拆成 token，逐一檢查是否長得像 IP。
+    回傳 (tokens, status)，status 為 "empty" / "mixed" / "ok"。
+    只要有任何一個 token 不是 IP 格式，整則視為 "mixed"，不擷取部分 IP 處理，
+    避免中文訊息裡意外夾雜的數字（版本號、日期、電話等）被誤判成 IP。
+    """
+    tokens = [t for t in TOKEN_SPLIT_RE.split(text.strip()) if t]
+    if not tokens:
+        return [], "empty"
+    if any(not IP_LIKE_RE.match(t) for t in tokens):
+        return tokens, "mixed"
+    return tokens, "ok"
 
 
 def process_ip_submission(ip_candidates):
@@ -166,12 +177,18 @@ def webhook():
     authorized_users = load_authorized_users()
 
     for event in data.get("events", []):
-        if event.get("type") != "message" or event.get("message", {}).get("type") != "text":
+        if event.get("type") != "message":
             continue
 
+        message = event.get("message", {})
         reply_token = event.get("replyToken")
         user_id = event.get("source", {}).get("userId", "")
-        text = event["message"].get("text", "").strip()
+
+        if message.get("type") != "text":
+            reply_message(reply_token, "目前只支援文字訊息，請傳送要加入黑名單的 IP。")
+            continue
+
+        text = message.get("text", "").strip()
 
         if user_id not in authorized_users:
             logger.warning("Unauthorized attempt from userId=%s text=%r", user_id, text)
@@ -181,13 +198,19 @@ def webhook():
             )
             continue
 
-        ip_candidates = extract_ip_candidates(text)
-        if not ip_candidates:
+        tokens, status = parse_ip_message(text)
+        if status == "empty":
             reply_message(reply_token, "請傳送要加入黑名單的 IP（可多筆，一行一個）。\n例如：\n1.2.3.4\n5.6.7.8")
+            continue
+        if status == "mixed":
+            reply_message(
+                reply_token,
+                "偵測到訊息夾雜非 IP 的文字，為避免誤判，整則不處理。\n請只傳送 IP（可多筆，一行一個，空白/逗號/換行分隔皆可）。",
+            )
             continue
 
         try:
-            result = process_ip_submission(ip_candidates)
+            result = process_ip_submission(tokens)
         except Exception as exc:
             logger.exception("Failed to process IP submission")
             reply_message(reply_token, f"處理失敗：{exc}")
