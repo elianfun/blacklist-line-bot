@@ -223,6 +223,19 @@ curl -s http://127.0.0.1:4040/api/requests/http   # 或直接看 journalctl -u n
 >
 > ⚠️ **ngrok 免費帳號整個帳號同時只能有 1 個 tunnel**，若你其他專案已經用同一組帳號開了 tunnel，這裡會啟動失敗（`ERR_NGROK_334`），需另外註冊新帳號或升級付費方案。
 
+`ngrok-blacklist-bot.service` 只用 `After=network.target blacklist-bot.service` 控制開機啟動順序，**刻意不加 `Requires=`**：Requires 會讓 bot 服務重啟/停止時連帶重啟 ngrok，白白浪費一次免費版的網址變動額度。拿掉之後兩個服務各自獨立，重啟、部署新版 `main.py`、改白名單都不會影響現有的 ngrok tunnel 與對外網址。
+
+想確認目前 LINE 後台登記的 Webhook 網址跟 ngrok 實際網址是否一致，可以直接查 LINE Messaging API（不需要登入 Developers Console 網頁）：
+
+```bash
+cd /home/inno/blacklist-bot/app
+set -a && source .env && set +a
+curl -s -X GET https://api.line.me/v2/bot/channel/webhook/endpoint \
+  -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN"
+```
+
+回傳的 `endpoint` 欄位跟 `curl -s http://127.0.0.1:4040/api/tunnels` 查到的 `public_url` 比對即可，兩者不一致時才需要回 LINE Developers 更新 Webhook URL。
+
 ---
 
 ## 設定 LINE Webhook

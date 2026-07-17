@@ -1,7 +1,6 @@
 [Unit]
 Description=ngrok tunnel for Blacklist LINE Bot
 After=network.target blacklist-bot.service
-Requires=blacklist-bot.service
 
 [Service]
 Type=simple
