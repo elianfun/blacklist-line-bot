@@ -1,0 +1,13 @@
+[Unit]
+Description=Cloudflare named tunnel for Blacklist LINE Bot
+After=network-online.target blacklist-bot.service
+Wants=network-online.target
+
+[Service]
+User=inno
+ExecStart=/home/inno/upas-api/bin/cloudflared tunnel --no-autoupdate --config /home/inno/.cloudflared/blacklist.yml run blacklist
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

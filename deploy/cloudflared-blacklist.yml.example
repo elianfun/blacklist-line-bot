@@ -1,0 +1,9 @@
+# 放在 /home/inno/.cloudflared/blacklist.yml
+tunnel: <blacklist tunnel UUID>
+credentials-file: /home/inno/.cloudflared/<blacklist tunnel UUID>.json
+ingress:
+  # 只放行 LINE webhook 與健康檢查，其他路徑一律 404
+  - hostname: blacklist.<你的網域>
+    path: ^/(webhook|healthz)$
+    service: http://127.0.0.1:8000
+  - service: http_status:404

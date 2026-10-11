@@ -12,11 +12,12 @@
 - [伺服器端部署](#伺服器端部署)
 - [設定 .env](#設定-env)
 - [設定授權名單](#設定授權名單)
-- [使用 ngrok 對外開放](#使用-ngrok-對外開放)
+- [使用 Cloudflare Tunnel 對外開放](#使用-cloudflare-tunnel-對外開放)
 - [設定 LINE Webhook](#設定-line-webhook)
 - [與本機批次匯入工具的關係](#與本機批次匯入工具的關係)
 - [常見問題](#常見問題)
 - [實作知識點](#實作知識點)
+- [附錄：舊做法 ngrok](#附錄舊做法-ngrok)
 
 ---
 
@@ -72,10 +73,11 @@ LINE App
 LINE Messaging API
   │  POST /webhook (HTTPS)
   ▼
-ngrok tunnel  ──────────────────────────────┐
-  │  轉發到 127.0.0.1:8000                    │ 對外網址會在 ngrok
-  ▼                                          │ 重啟後改變（免費版限制）
-Flask app (main.py, systemd: blacklist-bot)  │
+Cloudflare 具名 Tunnel（blacklist.<你的網域>，systemd: cloudflared-blacklist）
+  │  只放行 /webhook、/healthz，其他路徑 404
+  │  轉發到 127.0.0.1:8000（網址固定，重開機不變）
+  ▼
+Flask app (main.py, systemd: blacklist-bot)
   │  1. 驗證 X-Line-Signature（Channel secret）
   │  2. 檢查 userId 是否在 authorized_users.txt
   │  3. 解析 IP、比對白名單 / 現有 ip.txt 去重
@@ -191,59 +193,82 @@ U452daa2f31758ee28b4ff96dc884ea89
 
 ---
 
-## 使用 ngrok 對外開放
+## 使用 Cloudflare Tunnel 對外開放
 
-LINE Webhook 需要 HTTPS 公開網址，這裡用 ngrok 建立穿隧（不需在防火牆開對外 port）。
+LINE Webhook 需要 HTTPS 公開網址。這裡用**自有網域 + Cloudflare 具名 Tunnel**：網址固定、不需在防火牆開對外 port、也沒有 ngrok 免費版「網址會變」「整帳號 1 個 tunnel」的限制。
+
+> 同一台主機上的 UPAS API 也是用同一套 Cloudflare 帳號與 `cloudflared`（`/home/inno/upas-api/bin/cloudflared`），`cert.pem` 已登入過，不需重複 `tunnel login`。全新主機才需要先 `cloudflared tunnel login` 選網域授權一次。
+
+### 建立 tunnel 與 DNS
 
 ```bash
-# 安裝（Ubuntu 官方 apt repo）
-curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
-echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
-sudo apt update && sudo apt install ngrok -y
-
-# 設定 authtoken（去 https://dashboard.ngrok.com/get-started/your-authtoken 取得）
-ngrok config add-authtoken 你的token
+cd /home/inno/upas-api
+bin/cloudflared tunnel create blacklist
+bin/cloudflared tunnel route dns blacklist blacklist.<你的網域>
 ```
 
-常駐執行：
+### 設定檔：只放行必要路徑
+
+參考 `deploy/cloudflared-blacklist.yml.example`，放到 `/home/inno/.cloudflared/blacklist.yml`：
+
+```yaml
+tunnel: <blacklist tunnel UUID>
+credentials-file: /home/inno/.cloudflared/<blacklist tunnel UUID>.json
+ingress:
+  - hostname: blacklist.<你的網域>
+    path: ^/(webhook|healthz)$
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+### 常駐執行
 
 ```bash
-sudo install -o root -g root -m 644 deploy/ngrok-blacklist-bot.service /etc/systemd/system/ngrok-blacklist-bot.service
+sudo install -o root -g root -m 644 deploy/cloudflared-blacklist.service /etc/systemd/system/cloudflared-blacklist.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now ngrok-blacklist-bot.service
+sudo systemctl enable --now cloudflared-blacklist.service
 ```
 
-查看目前對外網址：
+`cloudflared-blacklist.service` 只用 `After=` 控制啟動順序、不加 `Requires=`，bot 重啟或部署新版不會影響 tunnel。
+
+### 驗證
 
 ```bash
-curl -s http://127.0.0.1:4040/api/requests/http   # 或直接看 journalctl -u ngrok-blacklist-bot.service
+curl -s -o /dev/null -w "%{http_code}
+" https://blacklist.<你的網域>/healthz          # 200
+curl -s -o /dev/null -w "%{http_code}
+" https://blacklist.<你的網域>/                 # 404（未放行路徑）
+curl -s -o /dev/null -w "%{http_code}
+" -X POST https://blacklist.<你的網域>/webhook      -H 'X-Line-Signature: x' -d '{}'                                                   # 400（偽造簽章被拒）
 ```
 
-> ⚠️ **免費版 ngrok 網址每次重啟都會變動**，重啟後要回 LINE Developers 重新設定 Webhook URL。若要固定網址，需升級 ngrok 付費方案並綁定 reserved domain。
->
-> ⚠️ **ngrok 免費帳號整個帳號同時只能有 1 個 tunnel**，若你其他專案已經用同一組帳號開了 tunnel，這裡會啟動失敗（`ERR_NGROK_334`），需另外註冊新帳號或升級付費方案。
+### 為什麼不加 Cloudflare Access？
 
-`ngrok-blacklist-bot.service` 只用 `After=network.target blacklist-bot.service` 控制開機啟動順序，**刻意不加 `Requires=`**：Requires 會讓 bot 服務重啟/停止時連帶重啟 ngrok，白白浪費一次免費版的網址變動額度。拿掉之後兩個服務各自獨立，重啟、部署新版 `main.py`、改白名單都不會影響現有的 ngrok tunnel 與對外網址。
+LINE 送 webhook 時無法附帶 Cloudflare Access 的 Service Token，加了會收不到訊息。這個入口的保護由三層負責：
 
-想確認目前 LINE 後台登記的 Webhook 網址跟 ngrok 實際網址是否一致，可以直接查 LINE Messaging API（不需要登入 Developers Console 網頁）：
-
-```bash
-cd /home/inno/blacklist-bot/app
-set -a && source .env && set +a
-curl -s -X GET https://api.line.me/v2/bot/channel/webhook/endpoint \
-  -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN"
-```
-
-回傳的 `endpoint` 欄位跟 `curl -s http://127.0.0.1:4040/api/tunnels` 查到的 `public_url` 比對即可，兩者不一致時才需要回 LINE Developers 更新 Webhook URL。
+1. Tunnel 只放行 `/webhook`、`/healthz`
+2. `X-Line-Signature` 簽章驗證（偽造請求回 400）
+3. `authorized_users.txt` 授權名單
 
 ---
 
 ## 設定 LINE Webhook
 
 1. 前往 LINE Developers Console（或 Official Account Manager）該 channel 的 **Messaging API** 頁籤
-2. **Webhook URL** 填入 `https://你的ngrok網址/webhook`，儲存
+2. **Webhook URL** 填入 `https://blacklist.<你的網域>/webhook`，儲存（也可用 API 設定，見下方）
 3. 確認「回應設定」的回應模式為「機器人」（見上方申請章節）
 4. 直接用手機傳訊息給官方帳號測試，比 Developers Console 的 Verify 按鈕更能反映真實情況
+
+用 API 設定與檢查（不需登入網頁）：
+
+```bash
+cd /home/inno/blacklist-bot/app
+set -a && source .env && set +a
+H="Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN"
+curl -s -X PUT https://api.line.me/v2/bot/channel/webhook/endpoint -H "$H"      -H 'Content-Type: application/json' -d '{"endpoint":"https://blacklist.<你的網域>/webhook"}'
+curl -s https://api.line.me/v2/bot/channel/webhook/endpoint -H "$H"          # 確認 endpoint 與 active:true
+curl -s -X POST https://api.line.me/v2/bot/channel/webhook/test -H "$H"      -H 'Content-Type: application/json' -d '{}'                              # success:true
+```
 
 ---
 
@@ -274,14 +299,20 @@ scp inno@192.168.50.50:/home/inno/hfs/share/blacklist/ip.txt D:\claude\blacklist
 **Q: Bot 回覆「處理失敗」？**
 多半是 `sudo -n` 呼叫 `blacklist-apply-update.sh` 失敗，檢查 `sudo -n /usr/local/sbin/blacklist-apply-update.sh` 能否免密碼執行，以及 `/etc/sudoers.d/blacklist-bot` 是否還在。
 
-**Q: ngrok 網址一直在變，很麻煩？**
-免費版本來就會這樣，升級付費方案綁定固定 domain 可以解決，同時也能突破「整帳號僅 1 個 tunnel」的限制。
+**Q: 從 ngrok 換到 Cloudflare Tunnel 要怎麼切換才安全？**
+1. 先建好 tunnel 並驗證 `/healthz`，ngrok 保持運作
+2. 記下舊的 webhook 網址（`GET .../webhook/endpoint`），再改成新網址並跑 `webhook/test`
+3. 實際傳訊確認 bot 有回應後，才 `sudo systemctl disable --now ngrok-blacklist-bot`
+4. 若有問題，把 webhook 改回舊網址即可回復
+
+**Q: 停手動測試的 cloudflared 時，把 systemd 的也停掉了？**
+`pkill -f` 會匹配所有同樣參數的程序（包含 systemd 啟動的那個），測試程序請用 PID 停止。
 
 **Q: 想加的 IP 沒有被加入，也沒有錯誤訊息？**
 檢查是否命中白名單（`whitelist.py` 的 `WHITELIST`），bot 回覆內容會明確列出「略過 N 個白名單 IP」。
 
-**Q: 重開機後 bot / ngrok 沒有自動啟動？**
-兩者都已設定 `systemctl enable`，理論上開機會自動啟動。可用 `systemctl status blacklist-bot ngrok-blacklist-bot` 確認狀態。
+**Q: 重開機後 bot / tunnel 沒有自動啟動？**
+兩者都已設定 `systemctl enable`，開機會自動啟動。可用 `systemctl status blacklist-bot cloudflared-blacklist` 確認狀態。
 
 ---
 
@@ -306,3 +337,52 @@ Bot process 完全不用 root 執行，也沒有廣泛的 sudo 權限。`/etc/su
 ### 5. 授權名單即時生效，不需重啟
 
 `load_authorized_users()` 在每次 webhook 請求時都重新讀取 `authorized_users.txt`，而不是啟動時載入一次快取。好處是管理員新增/移除授權對象後立即生效，不用重啟 bot service；代價是每次請求多一次檔案讀取，但這個檔案通常只有幾行，成本可忽略。
+
+---
+
+## 附錄：舊做法 ngrok
+
+> 已於 2026-10-11 改用 Cloudflare 具名 Tunnel，ngrok 服務已停用（`deploy/legacy/ngrok-blacklist-bot.service`）。以下保留作為參考。
+
+LINE Webhook 需要 HTTPS 公開網址，這裡用 ngrok 建立穿隧（不需在防火牆開對外 port）。
+
+```bash
+# 安裝（Ubuntu 官方 apt repo）
+curl -sSL https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+sudo apt update && sudo apt install ngrok -y
+
+# 設定 authtoken（去 https://dashboard.ngrok.com/get-started/your-authtoken 取得）
+ngrok config add-authtoken 你的token
+```
+
+常駐執行：
+
+```bash
+sudo install -o root -g root -m 644 deploy/legacy/ngrok-blacklist-bot.service /etc/systemd/system/ngrok-blacklist-bot.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ngrok-blacklist-bot.service
+```
+
+查看目前對外網址：
+
+```bash
+curl -s http://127.0.0.1:4040/api/requests/http   # 或直接看 journalctl -u ngrok-blacklist-bot.service
+```
+
+> ⚠️ **免費版 ngrok 網址每次重啟都會變動**，重啟後要回 LINE Developers 重新設定 Webhook URL。若要固定網址，需升級 ngrok 付費方案並綁定 reserved domain。
+>
+> ⚠️ **ngrok 免費帳號整個帳號同時只能有 1 個 tunnel**，若你其他專案已經用同一組帳號開了 tunnel，這裡會啟動失敗（`ERR_NGROK_334`），需另外註冊新帳號或升級付費方案。
+
+`ngrok-blacklist-bot.service` 只用 `After=network.target blacklist-bot.service` 控制開機啟動順序，**刻意不加 `Requires=`**：Requires 會讓 bot 服務重啟/停止時連帶重啟 ngrok，白白浪費一次免費版的網址變動額度。拿掉之後兩個服務各自獨立，重啟、部署新版 `main.py`、改白名單都不會影響現有的 ngrok tunnel 與對外網址。
+
+想確認目前 LINE 後台登記的 Webhook 網址跟 ngrok 實際網址是否一致，可以直接查 LINE Messaging API（不需要登入 Developers Console 網頁）：
+
+```bash
+cd /home/inno/blacklist-bot/app
+set -a && source .env && set +a
+curl -s -X GET https://api.line.me/v2/bot/channel/webhook/endpoint \
+  -H "Authorization: Bearer $LINE_CHANNEL_ACCESS_TOKEN"
+```
+
+回傳的 `endpoint` 欄位跟 `curl -s http://127.0.0.1:4040/api/tunnels` 查到的 `public_url` 比對即可，兩者不一致時才需要回 LINE Developers 更新 Webhook URL。
