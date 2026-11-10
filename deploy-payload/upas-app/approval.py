@@ -1,11 +1,10 @@
 """寫入操作的伺服器端人工審核（MFA 雙因子）：推送到「UPAS 審核」LINE Bot，
 核准者本人按確認並輸入一次性確認碼才執行。
 
-因子：
+因子（2026-11 起依使用者要求簡化為單因子）：
 1. LINE 帳號身分 —— 只有 APPROVERS 內的 userId 且為審核單申請人本人可核准
-2. 一次性確認碼（OTP）—— 建單時產生、只回傳給發起端（Hermes），不推送到 LINE；
-   核准者須在 LINE 輸入該碼，發起通道與審核通道兩邊到齊才執行
-3. 時效 —— 5 分鐘內有效、單次使用
+2. 時效 —— 5 分鐘內有效、單次使用
+（一次性確認碼已移除：按「確認執行」即生效；文字格式「確認 #單號」相容，多附的碼會被忽略）
 
 AI（Hermes）拿得到 pending_id 與確認碼，但無法在 LINE 端完成核准，仍需本人操作。
 審核單持久化於 SQLite（data/pending.db），服務重啟不遺失。
@@ -42,7 +41,7 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "pending.db")
 # rec: dict(pid, action, requester, created, status, result, approver, source_ip, otp, tries)
 router = APIRouter()
 
-CONFIRM_RE = re.compile(r"(?:確認|confirm|approve)\s+#?([0-9a-f]{8})\s+(\d{6})", re.I)
+CONFIRM_RE = re.compile(r"(?:確認|confirm|approve)\s+#?([0-9a-f]{8})(?:\s+(\d{6}))?", re.I)
 REJECT_RE = re.compile(r"(?:取消|reject|cancel)\s+#?([0-9a-f]{8})", re.I)
 
 
@@ -103,17 +102,14 @@ async def request(action: dict, summary: str, detail: str, requester: str, sourc
         raise HTTPException(403, "X-Line-User 不在核准者名單")
     _purge()
     pid = secrets.token_hex(4)
-    otp = f"{secrets.randbelow(1000000):06d}"
     rec = {"pid": pid, "action": action, "requester": requester, "created": time.time(),
-           "status": "pending", "result": None, "approver": None, "source_ip": source_ip,
-           "otp": otp, "tries": 0}
+           "status": "pending", "result": None, "approver": None, "source_ip": source_ip}
     _save(rec)
-    text = (f"🔐 UPAS 審核 #{pid}\n操作：{summary}\n{detail}\n來源：Hermes（{source_ip}）\n"
-            f"請按「確認執行」並輸入 6 碼確認碼（在 Hermes 對話中取得）。\n5 分鐘內有效。")
-    confirm = {"type": "template", "altText": f"UPAS 審核 #{pid}：{summary}",
+    text = (f"🔐 MFA認證 #{pid}\n操作：{summary}\n{detail}\n來源：Hermes（{source_ip}）\n"
+            f"請按「確認執行」或「取消」。\n5 分鐘內有效。")
+    confirm = {"type": "template", "altText": f"MFA認證 #{pid}：{summary}",
                "template": {"type": "confirm", "text": f"#{pid} {summary}"[:240], "actions": [
-                   {"type": "postback", "label": "確認執行（輸入確認碼）", "data": f"approve:{pid}",
-                    "inputOption": "openKeyboard", "fillInText": f"確認 #{pid} ",
+                   {"type": "postback", "label": "確認執行", "data": f"approve:{pid}",
                     "displayText": f"確認 #{pid}"},
                    {"type": "postback", "label": "取消", "data": f"reject:{pid}",
                     "displayText": f"取消 #{pid}"}]}}
@@ -124,9 +120,9 @@ async def request(action: dict, summary: str, detail: str, requester: str, sourc
         log.error("推送審核失敗 %s %s", r.status_code, r.text)
         raise HTTPException(502, "推送審核通知失敗")
     audit.write(requester, {**action, "pending_id": pid, "source_ip": source_ip}, "pending")
-    return {"status": "pending", "pending_id": pid, "confirm_code": otp,
-            "message": (f"已送出審核 #{pid}，確認碼 {otp}。請到「UPAS 審核」LINE 按『確認執行』"
-                        f"並輸入此確認碼（5 分鐘內有效）。AI 無法代為確認。")}
+    return {"status": "pending", "pending_id": pid,
+            "message": (f"已送出審核 #{pid}。請到「MFA認證」LINE 按『確認執行』"
+                        f"（5 分鐘內有效）。AI 無法代為確認。")}
 
 
 def status(pid: str) -> dict:
@@ -173,7 +169,7 @@ def _extract(ev: dict) -> tuple[str, str, str]:
     texts.extend(str(v) for v in params.values())
     for t in texts:
         if m := CONFIRM_RE.search(t):
-            return "approve", m.group(1), m.group(2)
+            return "approve", m.group(1), m.group(2) or ""
         if m := REJECT_RE.search(t):
             return "reject", m.group(1), ""
     return kind, pid, code
@@ -189,8 +185,8 @@ async def _handle(ev: dict):
         return
     kind, pid, code = _extract(ev)
     if not kind:
-        await _reply(token, "這個帳號只用於 UPAS 操作審核。\n確認請按審核卡按鈕並輸入確認碼，"
-                            "或直接傳送：確認 <審核單號> <確認碼>")
+        await _reply(token, "這個帳號只用於 UPAS 操作審核。\n確認請按審核卡『確認執行』按鈕，"
+                            "或直接傳送：確認 #<審核單號>")
         return
     _purge()
     rec = _get(pid) if pid else None
@@ -207,25 +203,11 @@ async def _handle(ev: dict):
         audit.write(uid, {**rec["action"], "pending_id": pid}, "rejected")
         await _reply(token, f"#{pid} 已取消。")
         return
-    # approve：需驗證一次性確認碼（MFA 因子 2）
+    # approve：本人 LINE 確認即生效（2026-11 起取消確認碼；文字多附的碼忽略）
     _expire_one(rec)
     if rec["status"] != "pending":
         _save(rec)
         await _reply(token, f"#{pid} 已逾時（5 分鐘）。")
-        return
-    if not code:
-        await _reply(token, f"#{pid} 缺少確認碼。\n請輸入：確認 {pid} <6 碼確認碼>")
-        return
-    if not hmac.compare_digest(code.strip(), rec["otp"]):
-        rec["tries"] += 1
-        if rec["tries"] >= MAX_TRIES:
-            rec["status"] = "expired"
-            _save(rec)
-            audit.write(uid, {**rec["action"], "pending_id": pid}, "otp_locked")
-            await _reply(token, f"#{pid} 確認碼錯誤次數過多，審核單已作廢。請重新送出操作。")
-            return
-        _save(rec)
-        await _reply(token, f"確認碼錯誤（剩 {MAX_TRIES - rec['tries']} 次機會）。\n請輸入：確認 {pid} <6 碼確認碼>")
         return
     rec["status"] = "approved"
     _save(rec)
