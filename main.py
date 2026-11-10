@@ -18,6 +18,7 @@ load_dotenv(BASE_DIR / ".env")
 
 CHANNEL_SECRET = os.environ["LINE_CHANNEL_SECRET"]
 CHANNEL_ACCESS_TOKEN = os.environ["LINE_CHANNEL_ACCESS_TOKEN"]
+INTERNAL_API_TOKEN = os.environ.get("API_TOKEN", "")
 
 AUTHORIZED_USERS_FILE = BASE_DIR / "authorized_users.txt"
 LIVE_IP_TXT = Path("/home/inno/hfs/share/blacklist/ip.txt")
@@ -322,6 +323,53 @@ def webhook():
 @app.route("/healthz", methods=["GET"])
 def healthz():
     return "OK", 200
+
+
+def check_internal_auth():
+    """內部 API 鑑權：僅供同機的 UPAS Tools API 呼叫（bearer token）。
+    tunnel ingress 只放行 /webhook、/healthz，/api 不對外。"""
+    if not INTERNAL_API_TOKEN:
+        abort(503)
+    auth = request.headers.get("Authorization", "")
+    if not hmac.compare_digest(auth, f"Bearer {INTERNAL_API_TOKEN}"):
+        abort(401)
+
+
+@app.route("/api/status", methods=["GET"])
+def api_status():
+    check_internal_auth()
+    raw = (request.args.get("ip") or "").strip()
+    ip_obj = get_ip_obj(raw)
+    if not ip_obj:
+        return {"error": "ip 格式錯誤"}, 400
+    current = set()
+    if LIVE_IP_TXT.exists():
+        for line in LIVE_IP_TXT.read_text(encoding="utf-8").splitlines():
+            obj = get_ip_obj(line)
+            if obj:
+                current.add(obj)
+    return {
+        "ip": str(ip_obj),
+        "in_blacklist": ip_obj in current,
+        "whitelisted": is_whitelisted(ip_obj, WHITELIST_NETWORKS),
+        "total": len(current),
+    }
+
+
+@app.route("/api/update", methods=["POST"])
+def api_update():
+    check_internal_auth()
+    data = request.get_json(silent=True) or {}
+    op = data.get("op")
+    ips = [str(x) for x in data.get("ips") or []]
+    if op not in ("add", "remove") or not ips:
+        return {"error": "op 需為 add/remove 且 ips 不可為空"}, 400
+    try:
+        result = process_ip_submission(ips) if op == "add" else process_ip_removal(ips)
+    except Exception as exc:
+        logger.exception("internal api update failed")
+        return {"error": str(exc)}, 500
+    return result
 
 
 if __name__ == "__main__":

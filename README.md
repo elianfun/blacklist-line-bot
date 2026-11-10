@@ -316,6 +316,12 @@ scp inno@192.168.50.50:/home/inno/hfs/share/blacklist/ip.txt D:\claude\blacklist
 
 ---
 
+## 內部 API（給同機的 UPAS Tools API）
+新增 `/api/status`（GET，查 IP 是否在黑名單／白名單）與 `/api/update`（POST，op=add/remove＋ips 清單），
+供同機的 UPAS Tools API 在 MFA 審核通過後呼叫；直接複用 process_ip_submission / process_ip_removal 的全部防呆。
+- 鑑權：`Authorization: Bearer <API_TOKEN>`（.env 的 API_TOKEN；留空則停用內部 API，回 503）
+- 不對外：cloudflared ingress 只放行 /webhook、/healthz，/api 僅 127.0.0.1 可達
+
 ## 實作知識點
 
 ### 1. LINE Webhook 簽章驗證
