@@ -113,10 +113,10 @@ async def request(action: dict, summary: str, detail: str, requester: str, sourc
     confirm = {"type": "template", "altText": f"UPAS 審核 #{pid}：{summary}",
                "template": {"type": "confirm", "text": f"#{pid} {summary}"[:240], "actions": [
                    {"type": "postback", "label": "確認執行（輸入確認碼）", "data": f"approve:{pid}",
-                    "inputOption": "openKeyboard", "fillInText": f"確認 {pid} ",
-                    "displayText": f"確認 {pid}"},
+                    "inputOption": "openKeyboard", "fillInText": f"確認 #{pid} ",
+                    "displayText": f"確認 #{pid}"},
                    {"type": "postback", "label": "取消", "data": f"reject:{pid}",
-                    "displayText": f"取消 {pid}"}]}}
+                    "displayText": f"取消 #{pid}"}]}}
     r = await _line("/v2/bot/message/push", {"to": requester, "messages": [{"type": "text", "text": text}, confirm]})
     if r.status_code != 200:
         rec["status"] = "error"
