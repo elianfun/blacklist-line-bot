@@ -42,8 +42,8 @@ DB_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "pending.db")
 # rec: dict(pid, action, requester, created, status, result, approver, source_ip, otp, tries)
 router = APIRouter()
 
-CONFIRM_RE = re.compile(r"(?:確認|confirm|approve)\s+([0-9a-f]{8})\s+(\d{6})", re.I)
-REJECT_RE = re.compile(r"(?:取消|reject|cancel)\s+([0-9a-f]{8})", re.I)
+CONFIRM_RE = re.compile(r"(?:確認|confirm|approve)\s+#?([0-9a-f]{8})\s+(\d{6})", re.I)
+REJECT_RE = re.compile(r"(?:取消|reject|cancel)\s+#?([0-9a-f]{8})", re.I)
 
 
 def enabled() -> bool:
@@ -114,9 +114,9 @@ async def request(action: dict, summary: str, detail: str, requester: str, sourc
                "template": {"type": "confirm", "text": f"#{pid} {summary}"[:240], "actions": [
                    {"type": "postback", "label": "確認執行（輸入確認碼）", "data": f"approve:{pid}",
                     "inputOption": "openKeyboard", "fillInText": f"確認 {pid} ",
-                    "displayText": f"確認 #{pid}"},
+                    "displayText": f"確認 {pid}"},
                    {"type": "postback", "label": "取消", "data": f"reject:{pid}",
-                    "displayText": f"取消 #{pid}"}]}}
+                    "displayText": f"取消 {pid}"}]}}
     r = await _line("/v2/bot/message/push", {"to": requester, "messages": [{"type": "text", "text": text}, confirm]})
     if r.status_code != 200:
         rec["status"] = "error"
